@@ -20,6 +20,7 @@ import android.Manifest;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.View;
 import android.widget.Button;
 
@@ -33,10 +34,17 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends AppCompatActivity implements View.OnClickListener  {
 
-    private Executor executor;
+    private Executor cameraProviderExecutor;
+
+    private final ThreadPoolExecutor imageCaptureExecutor = new ThreadPoolExecutor(2, 6, 0,
+            TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>());
+
     private final String[] camPermissions = new String[]{
             Manifest.permission.CAMERA,
             Manifest.permission.WRITE_EXTERNAL_STORAGE,
@@ -47,84 +55,89 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     private PreviewView previewView;
     private ImageCapture imageCapture;
     public static final int PERMISSION_ACCESS = 1001;
+    private Preview preview;
+    private String TAG = "CameraX";
+
 
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
         cameraProviderFuture = ProcessCameraProvider.getInstance(this);
-        executor = ContextCompat.getMainExecutor(this);
+
+        cameraProviderExecutor = ContextCompat.getMainExecutor(this);
+
         cameraSelector = new CameraSelector.Builder().requireLensFacing(CameraSelector.LENS_FACING_BACK).build();
+
         setContentView(R.layout.activity_main);
 
         previewView = findViewById(R.id.preview_view);
+//        Log.d(TAG,"preview view " + previewView.getDisplay().getRotation());
         Button shutterButton = findViewById(R.id.shutter_button);
         shutterButton.setOnClickListener(this);
 
-        if (Build.VERSION.SDK_INT >= 23) {
-            if (hasPermission(camPermissions)) {
+        previewView.post(() -> {
+
+            preview = getPreview();
+            imageCapture = getImageCapture();
+            preview.setPreviewSurfaceProvider(previewView.getPreviewSurfaceProvider());
+
+
+            if (Build.VERSION.SDK_INT >= 23) {
+                if (hasPermission(camPermissions)) {
+                    startCamera();
+                }
+            } else {
                 startCamera();
             }
-        } else {
-            startCamera();
-        }
+
+        });
 
     }
 
 
     private void startCamera() {
+        Log.d(TAG,"startCamera");
 
         cameraProviderFuture.addListener(() -> {
-            if (cameraProvider != null)
+            if (cameraProvider != null) {
                 cameraProvider.unbindAll();
+                Log.d(TAG, "cameraProvider.unbindAll");
+            }
             try {
+                Log.d(TAG, "try");
+                Log.d(TAG, "cameraProviderFuture.get");
                 cameraProvider = cameraProviderFuture.get();
 
-                Preview preview = new Preview.Builder()
-                        .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-                        .setTargetRotation(previewView.getDisplay().getRotation())
-                        .build();
-
-                preview.setPreviewSurfaceProvider(previewView.getPreviewSurfaceProvider());
-
+                Log.d(TAG, "build image provider");
                 // Set up the capture use case to allow users to take photos
-                imageCapture = new ImageCapture.Builder()
-                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                        .setTargetRotation(previewView.getDisplay().getRotation())
-                        .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-                        .build();
-
-                //TODO cant figure out the changes for the image analyzer
-
-//                //set up image analysis config
-//                ImageAnalysisConfig config =
-//                        new ImageAnalysisConfig.Builder()
-//                                .setTargetResolution(new Size(1280, 720))
-//                                .setImageReaderMode(ImageAnalysis.ImageReaderMode.ACQUIRE_LATEST_IMAGE)
-//                                .build();
-//
-//                //add the analyzer
-//                ImageAnalysis imageAnalysis = new ImageAnalysis(config) ;
-//
-//                imageAnalysis.setAnalyzer(
-//                        new ImageAnalysis.Analyzer() {
-//                            @Override
-//                            public void analyze(ImageProxy image, int rotationDegrees) {
-//                                // insert your code here.
-//                            }
-//                        });
-//
-//                //add the analyze listener
-
+                imageCapture = getImageCapture();
 
                 // Apply declared configs to CameraX using the same lifecycle owner
                 cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageCapture);
+//                cameraProvider.bindToLifecycle(getViewLifecycleOwner(), cameraSelector, preview, imageCapture);
 
             } catch (ExecutionException | InterruptedException e) {
                 e.printStackTrace();
             }
-        }, ContextCompat.getMainExecutor(previewView.getContext()));
+        }, cameraProviderExecutor);
 
+    }
+
+    private ImageCapture getImageCapture() {
+        return new ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .setTargetRotation(previewView.getDisplay().getRotation())
+                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                .build();
+    }
+
+    private Preview getPreview() {
+        return new Preview.Builder()
+                            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                            .setTargetRotation(previewView.getDisplay().getRotation())
+                            .build();
     }
 
     private void takePicture(){
@@ -133,7 +146,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         String date = fmt.format(System.currentTimeMillis());
 
         File file = new File(getCacheDir(), date+".jpg");
-        imageCapture.takePicture(file, executor, imageSavedListener);
+        imageCapture.takePicture(file, imageCaptureExecutor, imageSavedListener);
     }
 
     private ImageCapture.OnImageSavedCallback imageSavedListener = new ImageCapture.OnImageSavedCallback() {
